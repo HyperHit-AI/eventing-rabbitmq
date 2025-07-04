@@ -48,6 +48,8 @@ type adapterConfig struct {
 	QueueName     string `envconfig:"RABBITMQ_QUEUE_NAME" required:"true"`
 }
 
+const ctxContentEncodingKey string = "ContentEncoding"
+
 func NewEnvConfig() adapter.EnvConfigAccessor {
 	return &adapterConfig{}
 }
@@ -213,6 +215,10 @@ func (a *Adapter) postMessage(msg *amqp.Delivery) error {
 		ctx = cloudevents.ContextWithRetriesExponentialBackoff(ctx, backoffDelay, a.config.Retry)
 	}
 
+	if msg.ContentEncoding != "" {
+		a.logger.Info("Detected ", zap.String("ContentEncoding", msg.ContentEncoding))
+		ctx = context.WithValue(ctx, ctxContentEncodingKey, msg.ContentEncoding)
+	}
 	if err := a.client.Send(ctx, *event); !cloudevents.IsACK(err) {
 		a.logger.Error("error while sending the message", zap.Error(err))
 		return err

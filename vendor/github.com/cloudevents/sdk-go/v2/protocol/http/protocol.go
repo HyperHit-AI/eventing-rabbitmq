@@ -203,6 +203,11 @@ func (p *Protocol) makeRequest(ctx context.Context) *http.Request {
 		Method: http.MethodPost,
 		Header: HeaderFrom(ctx),
 	}
+	// Detect if ctx has ContentEncoding.
+	// If so, add it to the request header.
+	if enc, ok := ctx.Value("ContentEncoding").(string); ok {
+		req.Header.Add("Content-Encoding", enc)
+	}
 
 	if p.RequestTemplate != nil {
 		req.Method = p.RequestTemplate.Method
