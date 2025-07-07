@@ -205,6 +205,16 @@ func ConvertToCloudEvent(msg *amqp.Delivery, namespace, sourceName, queueName st
 	event.SetSubject(event.ID())
 	event.SetTime(msg.Timestamp)
 
+	// set the rabbitmq properties to the event extensions
+	event.SetExtension("queueName", queueName)
+	event.SetExtension("consumerTag", msg.ConsumerTag)
+	event.SetExtension("deliveryTag", msg.DeliveryTag)
+	event.SetExtension("redelivered", msg.Redelivered)
+	event.SetExtension("exchange", msg.Exchange)
+	event.SetExtension("routingKey", msg.RoutingKey)
+	event.SetExtension("correlationId", msg.CorrelationId)
+	event.SetExtension("replyTo", msg.ReplyTo)
+
 	err := event.SetData(msg.ContentType, msg.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set event data: %w", err)
