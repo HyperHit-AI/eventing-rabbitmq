@@ -195,11 +195,11 @@ func TestAdapter_PollForMessages(t *testing.T) {
 			BackoffDelay:  "PT0.20S",
 			Retry:         1,
 		},
-		context:   ctx,
-		logger:    zap.NewNop(),
-		rmqHelper: rabbit.NewRabbitMQConnectionHandler(5, 500, zap.NewNop().Sugar()),
+		context:        ctx,
+		logger:         zap.NewNop(),
+		consumerHelper: rabbit.NewRabbitMQConnectionHandler(5, 500, zap.NewNop().Sugar()),
 	}
-	a.rmqHelper.Setup(ctx, "", nil, rabbit.ValidDial)
+	a.consumerHelper.Setup(ctx, "", nil, rabbit.ValidDial)
 	go func() {
 		time.Sleep(500)
 		// Signal to the adapter to finish and do not retry
