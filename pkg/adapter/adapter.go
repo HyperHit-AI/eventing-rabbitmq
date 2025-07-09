@@ -18,6 +18,8 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -55,11 +57,12 @@ func NewEnvConfig() adapter.EnvConfigAccessor {
 }
 
 type Adapter struct {
-	config    *adapterConfig
-	logger    *zap.Logger
-	context   context.Context
-	rmqHelper rabbit.RabbitMQConnectionsHandlerInterface
-	client    cloudevents.Client
+	config          *adapterConfig
+	logger          *zap.Logger
+	context         context.Context
+	consumerHelper  rabbit.RabbitMQConnectionsHandlerInterface
+	publisherHelper rabbit.RabbitMQConnectionsHandlerInterface
+	client          cloudevents.Client
 }
 
 var _ adapter.MessageAdapter = (*Adapter)(nil)
@@ -88,9 +91,13 @@ func (a *Adapter) start(stopCh <-chan struct{}) error {
 		zap.String("QueueName", a.config.QueueName),
 		zap.String("SinkURI", a.config.Sink))
 
-	if a.rmqHelper == nil {
-		a.rmqHelper = rabbit.NewRabbitMQConnectionHandler(5, 1000, logger)
-		a.rmqHelper.Setup(a.context, rabbit.VHostHandler(a.config.RabbitURL, a.config.Vhost), rabbit.ChannelQoS, rabbit.DialWrapper)
+	if a.consumerHelper == nil {
+		a.consumerHelper = rabbit.NewRabbitMQConnectionHandler(5, 1000, logger)
+		a.consumerHelper.Setup(a.context, rabbit.VHostHandler(a.config.RabbitURL, a.config.Vhost), rabbit.ChannelQoS, rabbit.DialWrapper)
+	}
+	if a.publisherHelper == nil {
+		a.publisherHelper = rabbit.NewRabbitMQConnectionHandler(5, 1000, logger)
+		a.publisherHelper.Setup(a.context, rabbit.VHostHandler(a.config.RabbitURL, a.config.Vhost), nil, rabbit.DialWrapper)
 	}
 	return a.PollForMessages(stopCh)
 }
@@ -132,7 +139,7 @@ func (a *Adapter) PollForMessages(stopCh <-chan struct{}) error {
 	}
 
 	for {
-		if channel := a.rmqHelper.GetChannel(); channel != nil {
+		if channel := a.consumerHelper.GetChannel(); channel != nil {
 			if queue, err = channel.QueueDeclarePassive(
 				a.config.QueueName,
 				true,
@@ -141,7 +148,7 @@ func (a *Adapter) PollForMessages(stopCh <-chan struct{}) error {
 				false,
 				amqp.Table{},
 			); err == nil {
-				connNotifyChannel, chNotifyChannel := a.rmqHelper.GetConnection().NotifyClose(make(chan *amqp.Error, 1)), channel.NotifyClose(make(chan *amqp.Error, 1))
+				connNotifyChannel, chNotifyChannel := a.consumerHelper.GetConnection().NotifyClose(make(chan *amqp.Error, 1)), channel.NotifyClose(make(chan *amqp.Error, 1))
 				if msgs, err = a.ConsumeMessages(&queue, channel, logger); err == nil {
 				loop:
 					for {
@@ -177,23 +184,71 @@ func (a *Adapter) processMessages(wg *sync.WaitGroup, queue <-chan amqp.Delivery
 	defer wg.Done()
 	for msg := range queue {
 		a.logger.Info("Received: ", zap.String("MessageId", msg.MessageId))
-		if err := a.postMessage(&msg); err == nil {
+		responseEvent, err := a.postMessage(&msg)
+		if err == nil {
 			a.logger.Info("Successfully sent event to sink")
-			err = msg.Ack(false)
-			if err != nil {
+			// Debugging: Uncomment the following line to log the response event.
+			// if responseEvent != nil {
+			// 	a.logger.Info("Sink response", zap.ByteString("body", responseEvent.Data()))
+			// }
+			if msg.ReplyTo != "" {
+				// a.logger.Info("Replying to ", zap.String("ReplyTo", msg.ReplyTo), zap.String("CorrelationId", msg.CorrelationId))
+				var body []byte
+				if responseEvent != nil {
+					body = responseEvent.Data()
+				}
+				if err := a.publishMessage(msg.ReplyTo, msg.CorrelationId, body); err != nil {
+					a.logger.Error("failed to publish reply", zap.Error(err))
+				} else {
+					a.logger.Info("Published successsfully ", zap.String("ReplyTo", msg.ReplyTo), zap.String("CorrelationId", msg.CorrelationId))
+				}
+			}
+			if err := msg.Ack(false); err != nil {
 				a.logger.Error("sending Ack failed with Delivery Tag")
 			}
 		} else {
 			a.logger.Error("sending event to sink failed: ", zap.Error(err))
-			err = msg.Nack(false, false)
-			if err != nil {
+			if err := msg.Nack(false, false); err != nil {
 				a.logger.Error("sending Nack failed with Delivery Tag")
 			}
 		}
 	}
 }
 
-func (a *Adapter) postMessage(msg *amqp.Delivery) error {
+func (a *Adapter) publishMessage(replyTo, correlationID string, body []byte) error {
+	// Get the connection and assert it to the wrapper interface to create a new channel.
+	conn, ok := a.publisherHelper.GetConnection().(rabbit.RabbitMQConnectionWrapperInterface)
+	if !ok {
+		return errors.New("failed to assert connection to RabbitMQConnectionWrapperInterface")
+	}
+
+	// Create a new channel for each reply.
+	iChannel, err := conn.ChannelWrapper()
+	if err != nil {
+		return fmt.Errorf("failed to create a new channel for reply: %w", err)
+	}
+
+	// Assert the channel interface to the concrete amqp.Channel to be able to close it.
+	channel, ok := iChannel.(*amqp.Channel)
+	if !ok {
+		return errors.New("failed to assert RabbitMQChannelInterface to *amqp.Channel")
+	}
+	defer channel.Close()
+	_, err = channel.PublishWithDeferredConfirm(
+		"", // exchange
+		replyTo,
+		false, // mandatory
+		false, // immediate
+		amqp.Publishing{
+			ContentType:   "application/json",
+			CorrelationId: correlationID,
+			Body:          body,
+		},
+	)
+	return err
+}
+
+func (a *Adapter) postMessage(msg *amqp.Delivery) (*cloudevents.Event, error) {
 	event, err := rabbit.ConvertDeliveryMessageToCloudevent(
 		a.context,
 		a.config.Name,
@@ -203,7 +258,7 @@ func (a *Adapter) postMessage(msg *amqp.Delivery) error {
 		a.logger)
 	if err != nil {
 		a.logger.Error("error converting delivery message to event", zap.Error(err))
-		return err
+		return nil, err
 	}
 
 	ctx := a.context
@@ -219,10 +274,13 @@ func (a *Adapter) postMessage(msg *amqp.Delivery) error {
 		a.logger.Info("Detected ", zap.String("ContentEncoding", msg.ContentEncoding))
 		ctx = context.WithValue(ctx, ctxContentEncodingKey, msg.ContentEncoding)
 	}
-	if err := a.client.Send(ctx, *event); !cloudevents.IsACK(err) {
-		a.logger.Error("error while sending the message", zap.Error(err))
-		return err
+
+	// Use Request instead of Send to await a response from the sink.
+	responseEvent, result := a.client.Request(ctx, *event)
+	if !cloudevents.IsACK(result) {
+		a.logger.Error("error while sending the message", zap.Error(result))
+		return nil, result
 	}
 
-	return nil
+	return responseEvent, nil
 }
