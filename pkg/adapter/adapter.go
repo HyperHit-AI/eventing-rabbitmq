@@ -240,6 +240,7 @@ func (a *Adapter) publishMessage(replyTo, correlationID string, body []byte) err
 		false, // mandatory
 		false, // immediate
 		amqp.Publishing{
+			MessageId: correlationID + "-reply",
 			ContentType:   "application/json",
 			CorrelationId: correlationID,
 			Body:          body,
