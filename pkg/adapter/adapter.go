@@ -198,7 +198,7 @@ func (a *Adapter) processMessages(wg *sync.WaitGroup, queue <-chan amqp.Delivery
 					body = responseEvent.Data()
 				}
 				if err := a.publishMessage(msg.ReplyTo, msg.CorrelationId, body); err != nil {
-					a.logger.Error("failed to publish reply", zap.Error(err))
+					a.logger.Error("failed to publish reply", zap.String("CorrelationId", msg.CorrelationId), zap.Error(err))
 				} else {
 					a.logger.Info("Published successsfully ", zap.String("ReplyTo", msg.ReplyTo), zap.String("CorrelationId", msg.CorrelationId))
 				}
@@ -223,9 +223,17 @@ func (a *Adapter) publishMessage(replyTo, correlationID string, body []byte) err
 	}
 
 	// Create a new channel for each reply.
-	iChannel, err := conn.ChannelWrapper()
+	var iChannel rabbit.RabbitMQChannelInterface
+	var err error
+	for i := 0; i < 10; i++ {
+		iChannel, err = conn.ChannelWrapper()
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if err != nil {
-		return fmt.Errorf("failed to create a new channel for reply: %w", err)
+		return fmt.Errorf("Failed to create a new channel for reply after 10 retries: %w", err)
 	}
 
 	// Assert the channel interface to the concrete amqp.Channel to be able to close it.
@@ -279,7 +287,7 @@ func (a *Adapter) postMessage(msg *amqp.Delivery) (*cloudevents.Event, error) {
 	// Use Request instead of Send to await a response from the sink.
 	responseEvent, result := a.client.Request(ctx, *event)
 	if !cloudevents.IsACK(result) {
-		a.logger.Error("error while sending the message", zap.Error(result))
+		a.logger.Error("error while sending the message", zap.String("CorrelationId", msg.CorrelationId), zap.Error(result))
 		return nil, result
 	}
 
