@@ -186,7 +186,7 @@ func (a *Adapter) processMessages(wg *sync.WaitGroup, queue <-chan amqp.Delivery
 		a.logger.Info("Received: ", zap.String("MessageId", msg.MessageId))
 		responseEvent, err := a.postMessage(&msg)
 		if err == nil {
-			a.logger.Info("Successfully sent event to sink")
+			a.logger.Info("Successfully sent event to sink", zap.String("MessageId", msg.MessageId))
 			// Debugging: Uncomment the following line to log the response event.
 			// if responseEvent != nil {
 			// 	a.logger.Info("Sink response", zap.ByteString("body", responseEvent.Data()))
@@ -198,18 +198,18 @@ func (a *Adapter) processMessages(wg *sync.WaitGroup, queue <-chan amqp.Delivery
 					body = responseEvent.Data()
 				}
 				if err := a.publishMessage(msg.ReplyTo, msg.CorrelationId, body); err != nil {
-					a.logger.Error("failed to publish reply", zap.String("CorrelationId", msg.CorrelationId), zap.Error(err))
+					a.logger.Error("Publish reply failure", zap.String("MessageId", msg.MessageId), zap.Error(err))
 				} else {
-					a.logger.Info("Published successsfully ", zap.String("ReplyTo", msg.ReplyTo), zap.String("CorrelationId", msg.CorrelationId))
+					a.logger.Info("Publish reply successsfully ", zap.String("MessageId", msg.MessageId), zap.String("ReplyTo", msg.ReplyTo))
 				}
 			}
 			if err := msg.Ack(false); err != nil {
-				a.logger.Error("sending Ack failed with Delivery Tag")
+				a.logger.Error("Send Ack failed with Delivery Tag", zap.String("MessageId", msg.MessageId), zap.Error(err))
 			}
 		} else {
-			// a.logger.Error("sending event to sink failed: ", zap.Error(err))
+			a.logger.Error("Send event to sink failed: ", zap.String("MessageId", msg.MessageId), zap.Error(err))
 			if err := msg.Nack(false, false); err != nil {
-				a.logger.Error("sending Nack failed with Delivery Tag")
+				a.logger.Error("sending Nack failed with Delivery Tag", zap.String("MessageId", msg.MessageId), zap.Error(err))
 			}
 		}
 	}
