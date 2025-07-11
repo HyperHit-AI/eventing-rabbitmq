@@ -207,7 +207,7 @@ func (a *Adapter) processMessages(wg *sync.WaitGroup, queue <-chan amqp.Delivery
 				a.logger.Error("sending Ack failed with Delivery Tag")
 			}
 		} else {
-			a.logger.Error("sending event to sink failed: ", zap.Error(err))
+			// a.logger.Error("sending event to sink failed: ", zap.Error(err))
 			if err := msg.Nack(false, false); err != nil {
 				a.logger.Error("sending Nack failed with Delivery Tag")
 			}
@@ -248,7 +248,7 @@ func (a *Adapter) publishMessage(replyTo, correlationID string, body []byte) err
 		false, // mandatory
 		false, // immediate
 		amqp.Publishing{
-			MessageId: correlationID + "-reply",
+			MessageId:     correlationID + "-reply",
 			ContentType:   "application/json",
 			CorrelationId: correlationID,
 			Body:          body,
@@ -280,16 +280,26 @@ func (a *Adapter) postMessage(msg *amqp.Delivery) (*cloudevents.Event, error) {
 	}
 
 	if msg.ContentEncoding != "" {
-		a.logger.Info("Detected ", zap.String("ContentEncoding", msg.ContentEncoding))
+		// Debugging: Uncomment the following line to log the content encoding.
+		// a.logger.Info("Detected ", zap.String("ContentEncoding", msg.ContentEncoding))
 		ctx = context.WithValue(ctx, ctxContentEncodingKey, msg.ContentEncoding)
 	}
 
 	// Use Request instead of Send to await a response from the sink.
 	responseEvent, result := a.client.Request(ctx, *event)
-	if !cloudevents.IsACK(result) {
-		a.logger.Error("error while sending the message", zap.String("CorrelationId", msg.CorrelationId), zap.Error(result))
+
+	// Debugging: Uncomment the following line to log the response.
+	// a.logger.Info("Sink response", zap.String("MessageId", msg.MessageId), zap.Any("result", result), zap.Bool("useless ack_by_sdk", cloudevents.IsACK(result)), zap.Any("responseEvent", responseEvent))
+	if responseEvent == nil {
+		a.logger.Error("Sink response error", zap.String("MessageId", msg.MessageId), zap.Error(result))
+		// If result is nil , create a default error.
+		if result == nil {
+			result = errors.New("unknown error")
+		}
 		return nil, result
 	}
 
+	// If we got a response event, we consider it a success.
+	// the reason is HTTP responses are not always a valid cloudevent object. e.g 504 timeout
 	return responseEvent, nil
 }
